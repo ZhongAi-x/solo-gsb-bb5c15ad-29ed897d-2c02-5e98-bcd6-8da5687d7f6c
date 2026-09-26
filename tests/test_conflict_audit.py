@@ -251,6 +251,28 @@ def test_random_against_brute_force():
         )
 
 
+def test_small_cycle_large_clearance_tails_coalesce():
+    # 周期 2 秒的单秒绿灯、清空间隔不短于周期：每个尾部 [b, b+c) 必然盖住
+    # 后续若干个绿灯周期，延长集 E 内部必须先合并成连续长区间（不能逐秒
+    # 展开再排序）；但危险仍要求至少一股在绿灯，故两股同为奇数秒绿灯、
+    # 偶数秒均红灯时，极大危险区间仍是逐个奇数秒（与暴力参考一致）。
+    streams = [(2, 1, 0, 1), (2, 1, 0, 1)]
+    expected = [[2 * k + 1, 2 * k + 2] for k in range(43200)]
+    assert solve(streams, 0, 86400, [(0, 1, 60)]) == [expected]
+    expected_clip = [[2 * k + 1, 2 * k + 2] for k in range(50, 43200)]
+    assert solve(streams, 100, 86400, [(0, 1, 300)]) == [expected_clip]
+    assert brute_force(streams, 0, 86400, [(0, 1, 60)]) == [expected]
+
+    # 其中一股整周期常绿：另一股的延长集 E 连续，危险即常绿股的全部范围。
+    one_always_green = [(2, 0, 0, 0), (2, 1, 0, 1)]
+    assert solve(one_always_green, 0, 86400, [(0, 1, 60)]) == [
+        [[0, 86400]]
+    ]
+    assert brute_force(one_always_green, 0, 86400, [(0, 1, 60)]) == [
+        [[0, 86400]]
+    ]
+
+
 def test_random_full_day_range_with_large_clearance():
     # 全天范围 + 大周期 + 300 秒清空间隔的压力用例
     rng = random.Random(4242)

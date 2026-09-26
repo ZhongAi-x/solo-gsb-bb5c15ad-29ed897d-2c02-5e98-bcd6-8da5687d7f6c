@@ -186,10 +186,17 @@ headway），故采用动态规划：正向 ``f_j(t) = |t-o_j| + min f_{j-1}(s)`
 
 其中 T_X 为 X 延长出的尾部 ``[b, b+c)``；两股都已红灯的尾部交叠
 （``T_A ∩ T_B``，即直接对两个延长区间求交会多出的部分）**不**计入。
-枚举每股与扩大窗 ``[audit_from - c, audit_to)`` 相交的全部周期绿灯区间
-（计入起点**之前**开始的绿灯与跨零点区间），各取两段区间列表的交集再合并，
-裁剪进审计范围，即得该对按时间升序合并的全部**极大半开危险区间**；安全的
-车流对返回空数组。
+
+实现上每股车流的绿灯只在最大扩大窗
+``[audit_from - max_clearance, audit_to)`` 上**展开一次**（周期枚举天然按
+时间升序，流式合并，不集中排序），同一车流的全部清空间隔都复用这份展开：
+延长集 E = G ∪ T 只依赖各绿灯区间右端点，按 ``(车流, 清空间隔)`` 由已
+展开绿灯做一次有序归并得到（大 clearance 下相邻周期绿灯被尾部接成少量长
+区间），不随每个车流对重新展开、排序。每对危险集合等价为两次有序区间
+双指针求交的并 ``(E_A∩G_B) ∪ (G_A∩E_B)``（两股均红灯的 ``T_A∩T_B``
+不在其中），再有序归并并合重叠/相接段、裁剪进审计范围，即得该对按时间
+升序的全部**极大半开危险区间**；安全的车流对返回空数组。全程只做有序
+区间运算，复杂度与审计秒数内的区间数线性相关、不逐秒试探。
 """
 
 from __future__ import annotations
@@ -1538,6 +1545,35 @@ def compute_min_discharge(
 # ---------- 冲突车流安全间隔审计（conflict audit） ----------
 
 
+def _streaming_merge_intervals(
+    raw: Iterable[Interval],
+    lower: int | None = None,
+    upper: int | None = None,
+) -> list[Interval]:
+    """合并**已按起点升序**给出的半开区间，可选逐段裁剪进 [lower, upper)。
+
+    与 :func:`merge_intervals` 相同的"重叠或端点相接即合并"语义，但不重新
+    排序：周期展开、尾部映射等输入本身按时间升序产生，流式扫描即可线性完成。
+    """
+    merged: list[Interval] = []
+    for start, end in raw:
+        if lower is not None:
+            if end <= lower:
+                continue
+            if start < lower:
+                start = lower
+        if upper is not None and end > upper:
+            end = upper
+        if start >= end:
+            continue
+        if merged and start <= merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return merged
+
+
 def _enumerated_green_intervals(
     cycle: int,
     offset: int,
@@ -1545,38 +1581,156 @@ def _enumerated_green_intervals(
     green_end: int,
     window_from: int,
     window_to: int,
-    tail: int = 0,
 ) -> list[Interval]:
     """枚举展开时间轴上与 [window_from, window_to) 相交的全部绿灯区间。
 
-    与 :func:`departure_windows_for_intersection` 的周期展开一致：本地绿灯
-    分量 ``[a, b)``（跨零点为 ``[g_start, C)`` 与 ``[0, g_end)`` 两个分量，
-    常绿为 ``[0, C)``）对应绝对区间 ``[kC + a - offset, kC + b - offset)``
-    （本地相位为 ``(t + offset) mod C``）；只枚举与窗口有非空交的周期 k，
-    区间在枚举窗内裁剪，再合并重叠或端点相接的区间（相邻周期的分量会相接）。
+    本地相位为 ``(t + offset) mod C``，故本地绿灯分量 ``[a, b)`` 对应绝对
+    区间 ``[kC + a - offset, kC + b - offset)``。跨零点绿灯先视为**一条**
+    连续分量 ``[g_start, C + g_end)``（跨周期枚举，周期之间在绝对轴上首尾
+    相接并由流式合并接成一条），普通绿灯为 ``[g_start, g_end)`` 一条分量；
+    常绿为整周期 ``[0, C)``，直接取整个窗口即可。
 
-    ``tail > 0`` 且非常绿时，把每个绿灯区间的**右端点**向右延长 tail 秒
-    （``[a, b) → [a, b + tail)``），枚举窗相应左移 tail 秒以覆盖起点之前
-    开始的绿灯拖入窗口的尾部；常绿没有"绿灯结束"，不延长。
+    区间严格按周期 k 升序产生，故其起点天然有序：只需流式合并（不集中排序）
+    并裁剪进枚举窗。相邻周期的跨零点分量会在绝对轴上相接，由流式合并接成
+    一条；枚举窗内的区间已按起点升序、互不重叠。
     """
     if green_start == green_end:
         # 整周期常绿：直接与窗口求交即可，无需逐周期枚举。
-        return clip_intervals([[window_from, window_to]], window_from, window_to)
-    components = local_green_intervals(cycle, green_start, green_end)
-    raw: list[Interval] = []
-    for local_start, local_end in components:
-        extended_end = local_end + tail  # tail=0 时即原绿灯右端点
-        # 与 [window_from, window_to) 有非空交的周期 k：
-        #   kC + extended_end - offset > window_from
-        #   kC + local_start  - offset < window_to
-        k_min = (window_from - extended_end + offset) // cycle + 1
-        k_max = -((-(window_to - local_start + offset)) // cycle) - 1
-        for k in range(k_min, k_max + 1):
-            base = k * cycle
-            raw.append(
-                [base + local_start - offset, base + extended_end - offset]
-            )
-    return merge_intervals(clip_intervals(raw, window_from, window_to))
+        if window_from >= window_to:
+            return []
+        return [[window_from, window_to]]
+    if green_start < green_end:
+        components = ((green_start, green_end),)
+    else:
+        # 跨零点：一条连续分量 [g_start, C + g_end)，跨周期枚举。
+        components = ((green_start, cycle + green_end),)
+
+    def raw() -> Iterable[Interval]:
+        for local_start, local_end in components:
+            # 与 [window_from, window_to) 有非空交的周期 k：
+            #   kC + local_end   - offset > window_from
+            #   kC + local_start - offset < window_to
+            k_min = (window_from - local_end + offset) // cycle + 1
+            k_max = -((-(window_to - local_start + offset)) // cycle) - 1
+            for k in range(k_min, k_max + 1):
+                base = k * cycle
+                yield (
+                    base + local_start - offset,
+                    base + local_end - offset,
+                )
+
+    return _streaming_merge_intervals(raw(), window_from, window_to)
+
+
+def _extended_intervals(
+    greens: list[Interval], clearance: int
+) -> list[Interval]:
+    """绿灯集合 G 与其清空间隔尾部集合 T 的并集 E = G ∪ T。
+
+    对每个已展开绿灯 ``[a, b)``，尾部为自其右端点起的 ``[b, b+c)``。
+    G 的各段起点 ``g_s`` 与 T 的各段起点（对应绿灯右端点 ``g_e``）分别
+    严格递增，故像归并排序一样按"绿灯起点 vs 尾部起点"双指针归并这两条
+    有序流，重叠或端点相接即合并，无需排序、也不必先把整条尾部列表
+    物化。清空间隔较大（c 不小于相邻绿灯间隔）时尾部会把多个周期的绿灯
+    接成一条长区间——这正是复用展开、避免逐车流对重新展开的关键。
+    ``clearance == 0`` 时 E 即 G（直接复用同一列表，下游只读不改）。
+    """
+    if not clearance:
+        return greens
+    n = len(greens)
+    i = j = 0  # i：第 i 段绿灯起点 g_i[0]；j：第 j 段尾部起点 = g_j[1]
+    merged: list[Interval] = []
+    while i < n or j < n:
+        # 下一段取起点更小者：绿灯 g_i = [g_i0, g_i1) 或尾部 g_j = [g_j1, g_j1+c)。
+        if j >= n or (i < n and greens[i][0] <= greens[j][1]):
+            start, end = greens[i]
+            i += 1
+        else:
+            start = greens[j][1]
+            end = start + clearance
+            j += 1
+        if merged and start <= merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _intersect_ordered(
+    left: list[Interval], right: list[Interval]
+) -> list[Interval]:
+    """两组各自有序、互不相交的半开区间列表的交集（双指针，保持有序）。
+
+    同一段与对方多段相交时产生的相接片段顺手并成一条，输出仍为有序、互不
+    相交的半开区间。
+    """
+    i = j = 0
+    len_left = len(left)
+    len_right = len(right)
+    result: list[Interval] = []
+    while i < len_left and j < len_right:
+        ls, le = left[i]
+        rs, re = right[j]
+        start = ls if ls > rs else rs
+        end = le if le < re else re
+        if start < end:
+            if result and result[-1][1] == start:
+                result[-1][1] = end
+            else:
+                result.append([start, end])
+        if le < re:
+            i += 1
+        else:
+            j += 1
+    return result
+
+
+def _union_ordered_clipped(
+    left: list[Interval],
+    right: list[Interval],
+    lower: int,
+    upper: int,
+) -> list[Interval]:
+    """两组各自有序的半开区间列表的并集（双指针归并），裁剪进 [lower, upper)。
+
+    允许两组输入彼此重叠（如 G_a∩G_b 同时出现在两侧交集中）：逐段归并时
+    合并一切重叠或端点相接的区间，输出按起点升序的全部极大半开区间。
+    """
+    i = j = 0
+    len_left = len(left)
+    len_right = len(right)
+    merged: list[Interval] = []
+
+    def absorb(start: int, end: int) -> None:
+        if end <= lower or start >= upper:
+            return
+        if start < lower:
+            start = lower
+        if end > upper:
+            end = upper
+        if start >= end:
+            return
+        if merged and start <= merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+        else:
+            merged.append([start, end])
+
+    while i < len_left and j < len_right:
+        if left[i][0] <= right[j][0]:
+            absorb(*left[i])
+            i += 1
+        else:
+            absorb(*right[j])
+            j += 1
+    while i < len_left:
+        absorb(*left[i])
+        i += 1
+    while j < len_right:
+        absorb(*right[j])
+        j += 1
+    return merged
 
 
 def compute_conflict_audit(
@@ -1596,54 +1750,71 @@ def compute_conflict_audit(
 
     对每对车流，危险集合为
 
-        (G_a ∩ G_b) ∪ (G_a ∩ T_b) ∪ (T_a ∩ G_b)，
+        (G_a ∩ G_b) ∪ (T_a ∩ G_b) ∪ (G_a ∩ T_b)
+        = (E_a ∩ G_b) ∪ (G_a ∩ E_b)，   E_x = G_x ∪ T_x，
 
-    其中 G_X 为 X 的绿灯区间集合，T_X 为 X 绿灯尾部向右延长 clearance 秒的
-    尾部集合 ``[b, b + clearance)``；两股都已红灯的尾部交叠不计。枚举窗取
-    ``[audit_from - clearance, audit_to)``：起点**之前**结束但尾部拖入审计
-    范围的绿灯（含跨零点区间）同样被计入；结果统一裁剪进
-    ``[audit_from, audit_to)`` 并合并重叠或端点相接的区间。返回与 ``pairs``
-    同序、每组按时间升序合并的极大半开危险区间列表；安全的车流对为空数组。
+    其中 G_X 为 X 的绿灯区间集合，T_X 为 X 各绿灯右端点向右延长 clearance
+    秒的尾部集合 ``[b, b + clearance)``（非常绿才有；半开尾部自右端点起，
+    与 G_X 不相交）。右侧两个交集都要求**至少一股在绿灯**，故两股都已
+    红灯的尾部交叠 T_a ∩ T_b 不会计入。
+
+    每股车流的绿灯只在最大扩大窗
+    ``[audit_from - max_clearance, audit_to)`` 上展开**一次**并缓存：该窗
+    覆盖本请求里所有清空间隔所需的"起点**之前**结束但尾部拖入审计范围"的
+    绿灯（含跨零点区间），较小 clearance 的车流对直接复用同一份展开。延长
+    集 E 只依赖绿灯右端点，按 ``(车流, clearance)`` 由缓存绿灯做一次有序
+    归并并缓存（大 clearance 下相邻周期绿灯被尾部接成少量长区间），不随
+    车流对重新展开、排序。每对只做两次有序双指针求交与一次带裁剪的有序
+    归并，即得按时间升序的全部极大半开危险区间。返回与 ``pairs`` 同序的
+    结果列表；安全的车流对为空数组。
     """
+    max_clearance = max((pair[2] for pair in pairs), default=0)
+    window_from = audit_from - max_clearance
+
+    # 每股车流在最大扩大窗上只展开一次（有序、互不重叠），所有车流对复用。
+    greens_by_stream = [
+        _enumerated_green_intervals(
+            stream["cycle"], stream["offset"],
+            stream["green_start"], stream["green_end"],
+            window_from, audit_to,
+        )
+        for stream in streams
+    ]
+    # 延长集 E = G ∪ T 按 (车流下标, 清空间隔) 复用：同一车流、同一 c 的
+    # 不同车流对共享，不逐对重复展开。
+    extended_cache: dict[tuple[int, int], list[Interval]] = {}
+
+    def extended_for(index: int, clearance: int) -> list[Interval]:
+        key = (index, clearance)
+        cached = extended_cache.get(key)
+        if cached is None:
+            cached = _extended_intervals(
+                greens_by_stream[index], clearance
+            )
+            extended_cache[key] = cached
+        return cached
+
     results: list[list[Interval]] = []
     for index_a, index_b, clearance in pairs:
-        stream_a = streams[index_a]
-        stream_b = streams[index_b]
-        window_from = audit_from - clearance
-        greens_a = _enumerated_green_intervals(
-            stream_a["cycle"], stream_a["offset"],
-            stream_a["green_start"], stream_a["green_end"],
-            window_from, audit_to,
-        )
-        greens_b = _enumerated_green_intervals(
-            stream_b["cycle"], stream_b["offset"],
-            stream_b["green_start"], stream_b["green_end"],
-            window_from, audit_to,
-        )
-        if clearance:
-            # 延长后的区间 [a, b+c) 与原绿灯集合；尾部 T 为两者之差，
-            # 危险集合 = (G_a∩G_b) ∪ (E_a∩G_b) ∪ (G_a∩E_b)。
-            extended_a = _enumerated_green_intervals(
-                stream_a["cycle"], stream_a["offset"],
-                stream_a["green_start"], stream_a["green_end"],
-                window_from, audit_to, tail=clearance,
-            )
-            extended_b = _enumerated_green_intervals(
-                stream_b["cycle"], stream_b["offset"],
-                stream_b["green_start"], stream_b["green_end"],
-                window_from, audit_to, tail=clearance,
-            )
-            danger = (
-                intersect_interval_lists(greens_a, greens_b)
-                + intersect_interval_lists(extended_a, greens_b)
-                + intersect_interval_lists(greens_a, extended_b)
+        greens_a = greens_by_stream[index_a]
+        greens_b = greens_by_stream[index_b]
+        if clearance == 0:
+            # 无清空间隔：危险恰为两股同时绿灯的部分，裁剪进审计范围。
+            danger = _streaming_merge_intervals(
+                _intersect_ordered(greens_a, greens_b),
+                audit_from, audit_to,
             )
         else:
-            # clearance=0：延长尾部为空，危险恰为两股绿灯同时成立的部分。
-            danger = intersect_interval_lists(greens_a, greens_b)
-        results.append(
-            merge_intervals(
-                clip_intervals(danger, audit_from, audit_to)
+            # 危险 = (E_a∩G_b) ∪ (G_a∩E_b)；两个交集各自有序，归并时裁剪
+            # 进审计范围并合重叠/相接（含两侧共有的 G_a∩G_b）为极大区间。
+            danger = _union_ordered_clipped(
+                _intersect_ordered(
+                    extended_for(index_a, clearance), greens_b
+                ),
+                _intersect_ordered(
+                    greens_a, extended_for(index_b, clearance)
+                ),
+                audit_from, audit_to,
             )
-        )
+        results.append(danger)
     return results
