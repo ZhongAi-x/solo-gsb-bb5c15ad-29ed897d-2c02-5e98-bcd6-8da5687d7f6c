@@ -251,6 +251,43 @@ def test_random_against_brute_force():
         )
 
 
+def test_dense_identical_streams_full_day_is_fast():
+    # 回归用例（题面场景）：8 股周期 2 秒的同参数车流、16 个互斥对、
+    # 86400 秒审计范围。旧实现为每对反复展开数万个绿灯区间并整体排序，
+    # 耗时二十余秒；展开按车流与清空间隔复用后应在 2 秒内返回。同参数
+    # 车流的危险集合即其绿灯集合（每秒一段，c=0 时逐段相接但双侧红灯秒
+    # 不计，故仍是 43200 个互不相交的半开区间）。
+    import time
+
+    streams = [
+        (2, 0, 0, 1) for _ in range(8)
+    ]
+    pairs = [(i, j, 0) for i in range(8) for j in range(i + 1, 8)][:16]
+    start = time.perf_counter()
+    got = solve(streams, 0, 86400, pairs)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"conflict audit blocked for {elapsed:.1f}s"
+    expected = brute_force(streams, 0, 86400, pairs)
+    assert got == expected
+    assert len(got) == 16
+    assert all(len(group) == 43200 for group in got)
+    # 响应保持输入车流对顺序：逐对与期望一致即覆盖顺序要求。
+
+
+def test_dense_bridging_tail_full_day_one_interval_per_pair():
+    # 同参数车流的危险集合即其绿灯集合：每股周期 2、常绿时每对恰为覆盖
+    # 全天的一段。结构共享使该场景在毫秒级返回（旧实现需反复展开排序）。
+    import time
+
+    streams = [(2, 0, 0, 0) for _ in range(8)]
+    pairs = [(i, j, 300) for i in range(8) for j in range(i + 1, 8)][:16]
+    start = time.perf_counter()
+    got = solve(streams, 0, 86400, pairs)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"conflict audit blocked for {elapsed:.1f}s"
+    assert got == [[[0, 86400]] for _ in pairs]
+
+
 def test_random_full_day_range_with_large_clearance():
     # 全天范围 + 大周期 + 300 秒清空间隔的压力用例
     rng = random.Random(4242)
